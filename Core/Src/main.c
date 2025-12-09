@@ -21,7 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "arm_math.h"
+#include "arm_const_structs.h"
+#include "arm_common_tables.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +33,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define ADC_BUF_LEN 1024
+#define ADC_BUF_LEN 	1024
+#define FFT_LEN 		ADC_BUF_LEN
+#define SAMPLE_RATE_HZ	1000000.0f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,9 +55,17 @@ UART_HandleTypeDef huart1;
 uint16_t adc_buf[ADC_BUF_LEN];
 volatile uint8_t uart_busy = 0;
 volatile uint8_t pending_tx = 0;
+volatile uint8_t fft_ready = 0;
 
 uint8_t* next_tx_ptr;
 uint16_t next_tx_len;
+
+float adc_f32[FFT_LEN];
+float fft_out[FFT_LEN];
+float mag[FFT_LEN/2];
+
+arm_rfft_fast_instance_f32 S;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -108,6 +120,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start(&htim6);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
+
+  if(arm_rfft_fast_init_f32(&S, FFT_LEN) != ARM_MATH_SUCCESS)
+  {
+	  Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -115,7 +132,41 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+	    if (fft_ready)
+	    {
+	        fft_ready = 0;
 
+	        float mean = 0.0f;
+	        for (int i = 0; i < FFT_LEN; i++)
+	            mean += adc_buf[i];
+	        mean /= FFT_LEN;
+
+	        // DC remove
+	        for (int i = 0; i < FFT_LEN; i++)
+	            adc_f32[i] = adc_buf[i] - mean;
+
+
+	        // 2) window
+
+	        // 3) RFFT 수행
+	        arm_rfft_fast_f32(&S, adc_f32, fft_out, 0); // 0 = Forward FFT
+
+	        // 4) magnitude in complex
+	        arm_cmplx_mag_f32(fft_out, mag, FFT_LEN/2);
+
+	        // 5) max peak
+	        float max_val;
+	        uint32_t max_idx;
+	        arm_max_f32(mag, FFT_LEN/2, &max_val, &max_idx);
+
+	        float freq_hz = (float)max_idx * (SAMPLE_RATE_HZ / (float)FFT_LEN);
+
+	        // 6) freq
+	        char msg[64];
+	        int len = snprintf(msg, sizeof(msg), "Peak bin: %lu, Freq: %.1f Hz\r\n",
+	                           (unsigned long)max_idx, freq_hz);
+	        HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, HAL_MAX_DELAY);
+	    }
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -370,6 +421,7 @@ void UART_TryStartTx(void)
 
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
+	/*
     if (hadc->Instance == ADC1)
     {
         next_tx_ptr = (uint8_t*)adc_buf;
@@ -377,22 +429,24 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
         pending_tx = 1;
 
         UART_TryStartTx();
-    }
+    }*/
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
+    	fft_ready = 1;
+    	/*
     	//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
         next_tx_ptr = (uint8_t*)&adc_buf[ADC_BUF_LEN / 2];
         next_tx_len = (ADC_BUF_LEN / 2) * 2;
         pending_tx = 1;
 
-        UART_TryStartTx();
+        UART_TryStartTx();*/
     }
 }
-
+/*
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
@@ -400,7 +454,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
         uart_busy = 0;
         UART_TryStartTx();
     }
-}
+}*/
 /* USER CODE END 4 */
 
 /**
