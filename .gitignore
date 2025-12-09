@@ -1,0 +1,34 @@
+# Build directories
+Debug/
+Release/
+
+# STM32CubeIDE settings
+.settings/
+*.launch
+
+# IDE metadata
+*.project
+*.cproject
+*.mxproject
+
+# STM32CubeMX generated backup files
+*.ioc-backup
+
+# Object files and build artifacts
+*.o
+*.d
+*.elf
+*.map
+*.lst
+*.axf
+*.bin
+*.hex
+
+# Generated library folders (if any)
+**/Drivers/CMSIS/Device/ST/*/Include/startup*/Startup/
+
+# MacOS metadata
+.DS_Store
+
+# User/temp files
+*.swp
