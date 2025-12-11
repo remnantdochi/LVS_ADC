@@ -24,6 +24,7 @@
 #include "arm_math.h"
 #include "arm_const_structs.h"
 #include "arm_common_tables.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,8 +35,11 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define ADC_BUF_LEN 	1024
-#define FFT_LEN 		ADC_BUF_LEN
 #define SAMPLE_RATE_HZ	1000000.0f
+
+#define CZT_N			512U
+#define CZT_M			128U
+#define CZT_L			1024U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,11 +64,16 @@ volatile uint8_t fft_ready = 0;
 uint8_t* next_tx_ptr;
 uint16_t next_tx_len;
 
-float adc_f32[FFT_LEN];
-float fft_out[FFT_LEN];
-float mag[FFT_LEN/2];
-
-arm_rfft_fast_instance_f32 S;
+// --- CZT working buffers (fixed size, no malloc) ---
+float czt_y_real[CZT_L];
+float czt_y_imag[CZT_L];
+float czt_v_real[CZT_L];
+float czt_v_imag[CZT_L];
+float czt_Y[2 * CZT_L];   // interleaved complex
+float czt_V[2 * CZT_L];
+float czt_G[2 * CZT_L];
+float czt_out_real[CZT_M];
+float czt_out_imag[CZT_M];
 
 /* USER CODE END PV */
 
@@ -76,7 +85,15 @@ static void MX_ADC1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
+void czt_fft(const float *x,
+             uint32_t n,
+             uint32_t m,
+             float w_real, float w_imag,
+             float a_real, float a_imag,
+             float *out_real,
+             float *out_imag);
 
+void run_czt_on_adc_block(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -118,13 +135,10 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+
   HAL_TIM_Base_Start(&htim6);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
 
-  if(arm_rfft_fast_init_f32(&S, FFT_LEN) != ARM_MATH_SUCCESS)
-  {
-	  Error_Handler();
-  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -135,37 +149,7 @@ int main(void)
 	    if (fft_ready)
 	    {
 	        fft_ready = 0;
-
-	        float mean = 0.0f;
-	        for (int i = 0; i < FFT_LEN; i++)
-	            mean += adc_buf[i];
-	        mean /= FFT_LEN;
-
-	        // DC remove
-	        for (int i = 0; i < FFT_LEN; i++)
-	            adc_f32[i] = adc_buf[i] - mean;
-
-
-	        // 2) window
-
-	        // 3) RFFT 수행
-	        arm_rfft_fast_f32(&S, adc_f32, fft_out, 0); // 0 = Forward FFT
-
-	        // 4) magnitude in complex
-	        arm_cmplx_mag_f32(fft_out, mag, FFT_LEN/2);
-
-	        // 5) max peak
-	        float max_val;
-	        uint32_t max_idx;
-	        arm_max_f32(mag, FFT_LEN/2, &max_val, &max_idx);
-
-	        float freq_hz = (float)max_idx * (SAMPLE_RATE_HZ / (float)FFT_LEN);
-
-	        // 6) freq
-	        char msg[64];
-	        int len = snprintf(msg, sizeof(msg), "Peak bin: %lu, Freq: %.1f Hz\r\n",
-	                           (unsigned long)max_idx, freq_hz);
-	        HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, HAL_MAX_DELAY);
+	        run_czt_on_adc_block();
 	    }
     /* USER CODE BEGIN 3 */
   }
@@ -410,6 +394,185 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void czt_fft(const float *x,
+             uint32_t n,
+             uint32_t m,
+             float w_real, float w_imag,
+             float a_real, float a_imag,
+             float *out_real,
+             float *out_imag)
+{
+    const uint32_t N = n;
+    const uint32_t M = m;
+    const uint32_t L = CZT_L;  // 1024로 고정
+
+    // 1) y[n] = x[n] * a^{-n} * w^{n^2/2}
+    for (uint32_t i = 0; i < L; i++) {
+        czt_y_real[i] = 0.0f;
+        czt_y_imag[i] = 0.0f;
+    }
+
+    float a_abs2 = a_real * a_real + a_imag * a_imag;
+    float w_abs2 = w_real * w_real + w_imag * w_imag;
+    float a_arg  = atan2f(a_imag, a_real);
+    float w_arg  = atan2f(w_imag, w_real);
+
+    for (uint32_t n_idx = 0; n_idx < N; n_idx++)
+    {
+        float rn = (float)n_idx;
+
+        float a_mag = powf(a_abs2, -0.5f * rn);
+        float a_ang = -rn * a_arg;
+
+        float w_mag = powf(w_abs2, 0.5f * rn * rn);
+        float w_ang = 0.5f * rn * rn * w_arg;
+
+        float ang = a_ang + w_ang;
+        float mag = a_mag * w_mag;
+
+        float c_real = mag * arm_cos_f32(ang);
+        float c_imag = mag * arm_sin_f32(ang);
+
+        czt_y_real[n_idx] = x[n_idx] * c_real;
+        czt_y_imag[n_idx] = x[n_idx] * c_imag;
+    }
+
+    // 2) convolution kernel v
+    for (uint32_t i = 0; i < L; i++) {
+        czt_v_real[i] = 0.0f;
+        czt_v_imag[i] = 0.0f;
+    }
+
+    for (uint32_t k = 0; k < M; k++)
+    {
+        float rk = (float)k;
+        float mag = powf(w_abs2, -0.5f * rk * rk);
+        float ang = -0.5f * rk * rk * w_arg;
+
+        czt_v_real[k] = mag * arm_cos_f32(ang);
+        czt_v_imag[k] = mag * arm_sin_f32(ang);
+    }
+
+    for (uint32_t k = 1; k < N; k++)
+    {
+        float rk = (float)k;
+        float mag = powf(w_abs2, -0.5f * rk * rk);
+        float ang = -0.5f * rk * rk * w_arg;
+
+        czt_v_real[L - k] = mag * arm_cos_f32(ang);
+        czt_v_imag[L - k] = mag * arm_sin_f32(ang);
+    }
+
+    // 3) FFT(y), FFT(v)
+    arm_cfft_radix4_instance_f32 fft_inst;
+    arm_cfft_radix4_init_f32(&fft_inst, L, 0, 1);
+
+    for (uint32_t i = 0; i < L; i++)
+    {
+        czt_Y[2*i]   = czt_y_real[i];
+        czt_Y[2*i+1] = czt_y_imag[i];
+
+        czt_V[2*i]   = czt_v_real[i];
+        czt_V[2*i+1] = czt_v_imag[i];
+    }
+
+    arm_cfft_radix4_f32(&fft_inst, czt_Y);
+    arm_cfft_radix4_f32(&fft_inst, czt_V);
+
+    // Multiply G = Y * V
+    for (uint32_t i = 0; i < L; i++)
+    {
+        float Yr = czt_Y[2*i];
+        float Yi = czt_Y[2*i+1];
+        float Vr = czt_V[2*i];
+        float Vi = czt_V[2*i+1];
+
+        czt_G[2*i]   = Yr * Vr - Yi * Vi;
+        czt_G[2*i+1] = Yr * Vi + Yi * Vr;
+    }
+
+    // IFFT(G)
+    arm_cfft_radix4_init_f32(&fft_inst, L, 1, 1);
+    arm_cfft_radix4_f32(&fft_inst, czt_G);
+
+    // 4) Final chirp and output
+    for (uint32_t k = 0; k < M; k++)
+    {
+        float rk = (float)k;
+        float mag = powf(w_abs2, 0.5f * rk * rk);
+        float ang = 0.5f * rk * rk * w_arg;
+
+        float c_real = mag * arm_cos_f32(ang);
+        float c_imag = mag * arm_sin_f32(ang);
+
+        float Gr = czt_G[2*k];
+        float Gi = czt_G[2*k+1];
+
+        out_real[k] = Gr * c_real - Gi * c_imag;
+        out_imag[k] = Gr * c_imag + Gi * c_real;
+    }
+}
+
+void run_czt_on_adc_block(void)
+{
+    // 1) ADC 버퍼를 float로 변환 + DC 제거 (앞 512 샘플 사용)
+    static float x[CZT_N];
+
+    float mean = 0.0f;
+    for (uint32_t i = 0; i < CZT_N; i++)
+        mean += (float)adc_buf[i];
+    mean /= (float)CZT_N;
+
+    for (uint32_t i = 0; i < CZT_N; i++)
+        x[i] = (float)adc_buf[i] - mean;
+
+    // 2) 457kHz ±100Hz 대역으로 CZT 설정
+    float f_center = 457000.0f;
+    float span     = 200.0f;
+    float f_start  = f_center - span * 0.5f;   // 456900 Hz
+    float f_end    = f_center + span * 0.5f;   // 457100 Hz
+
+    float W_ang = -2.0f * PI * (f_end - f_start) / (CZT_M * SAMPLE_RATE_HZ);
+    float A_ang =  2.0f * PI * f_start / SAMPLE_RATE_HZ;
+
+    float W_real = arm_cos_f32(W_ang);
+    float W_imag = arm_sin_f32(W_ang);
+    float A_real = arm_cos_f32(A_ang);
+    float A_imag = arm_sin_f32(A_ang);
+
+    // 3) CZT 실행
+    czt_fft(x, CZT_N, CZT_M, W_real, W_imag, A_real, A_imag,
+            czt_out_real, czt_out_imag);
+
+    // 4) 출력에서 피크 탐색
+    float max_val = 0.0f;
+    uint32_t max_idx = 0;
+
+    for (uint32_t k = 0; k < CZT_M; k++)
+    {
+        float re = czt_out_real[k];
+        float im = czt_out_imag[k];
+        float m  = sqrtf(re*re + im*im);
+
+        if (m > max_val)
+        {
+            max_val = m;
+            max_idx = k;
+        }
+    }
+
+    // 5) 피크 bin → 실제 주파수
+    float bin_df = (f_end - f_start) / (float)CZT_M;
+    float peak_freq = f_start + bin_df * (float)max_idx;
+
+    char msg[80];
+    int len = snprintf(msg, sizeof(msg),
+                       "CZT peak around %.1f Hz (bin %lu)\r\n",
+                       peak_freq, (unsigned long)max_idx);
+    HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, HAL_MAX_DELAY);
+}
+
 void UART_TryStartTx(void)
 {
     if (!uart_busy && pending_tx) {
