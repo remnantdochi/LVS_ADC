@@ -61,6 +61,7 @@ volatile uint8_t uart_busy = 0;
 volatile uint8_t pending_tx = 0;
 volatile uint8_t fft_ready = 0;
 
+uint16_t* fft_input_ptr = NULL;
 uint8_t* next_tx_ptr;
 uint16_t next_tx_len;
 
@@ -405,7 +406,7 @@ void czt_fft(const float *x,
 {
     const uint32_t N = n;
     const uint32_t M = m;
-    const uint32_t L = CZT_L;  // 1024로 고정
+    const uint32_t L = CZT_L;
 
     // 1) y[n] = x[n] * a^{-n} * w^{n^2/2}
     for (uint32_t i = 0; i < L; i++) {
@@ -516,7 +517,6 @@ void czt_fft(const float *x,
 
 void run_czt_on_adc_block(void)
 {
-    // 1) ADC 버퍼를 float로 변환 + DC 제거 (앞 512 샘플 사용)
     static float x[CZT_N];
 
     float mean = 0.0f;
@@ -527,7 +527,6 @@ void run_czt_on_adc_block(void)
     for (uint32_t i = 0; i < CZT_N; i++)
         x[i] = (float)adc_buf[i] - mean;
 
-    // 2) 457kHz ±100Hz 대역으로 CZT 설정
     float f_center = 457000.0f;
     float span     = 200.0f;
     float f_start  = f_center - span * 0.5f;   // 456900 Hz
@@ -541,11 +540,11 @@ void run_czt_on_adc_block(void)
     float A_real = arm_cos_f32(A_ang);
     float A_imag = arm_sin_f32(A_ang);
 
-    // 3) CZT 실행
+    // 3) CZT
     czt_fft(x, CZT_N, CZT_M, W_real, W_imag, A_real, A_imag,
             czt_out_real, czt_out_imag);
 
-    // 4) 출력에서 피크 탐색
+    // 4) peak identify
     float max_val = 0.0f;
     uint32_t max_idx = 0;
 
@@ -562,7 +561,7 @@ void run_czt_on_adc_block(void)
         }
     }
 
-    // 5) 피크 bin → 실제 주파수
+    // 5) peak bin -> freq
     float bin_df = (f_end - f_start) / (float)CZT_M;
     float peak_freq = f_start + bin_df * (float)max_idx;
 
@@ -572,7 +571,7 @@ void run_czt_on_adc_block(void)
                        peak_freq, (unsigned long)max_idx);
     HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, HAL_MAX_DELAY);
 }
-
+/*
 void UART_TryStartTx(void)
 {
     if (!uart_busy && pending_tx) {
@@ -580,19 +579,21 @@ void UART_TryStartTx(void)
         pending_tx = 0;
         HAL_UART_Transmit_IT(&huart1, next_tx_ptr, next_tx_len);
     }
-}
+}*/
 
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
-	/*
     if (hadc->Instance == ADC1)
     {
+    	fft_ready = 1;
+    	fft_input_ptr = &adc_buf[0];
+    	/*
         next_tx_ptr = (uint8_t*)adc_buf;
         next_tx_len = (ADC_BUF_LEN / 2) * 2; // half-buffer (bytes)
         pending_tx = 1;
 
-        UART_TryStartTx();
-    }*/
+        UART_TryStartTx();*/
+    }
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
@@ -600,6 +601,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     if (hadc->Instance == ADC1)
     {
     	fft_ready = 1;
+    	fft_input_ptr = &adc_buf[512];
     	/*
     	//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
         next_tx_ptr = (uint8_t*)&adc_buf[ADC_BUF_LEN / 2];
