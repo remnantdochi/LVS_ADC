@@ -519,13 +519,17 @@ void run_czt_on_adc_block(void)
 {
     static float x[CZT_N];
 
+    if (fft_input_ptr == NULL)
+            return;
+
     float mean = 0.0f;
     for (uint32_t i = 0; i < CZT_N; i++)
-        mean += (float)adc_buf[i];
+        mean += (float)fft_input_ptr[i];
+
     mean /= (float)CZT_N;
 
     for (uint32_t i = 0; i < CZT_N; i++)
-        x[i] = (float)adc_buf[i] - mean;
+        x[i] = (float)fft_input_ptr[i] - mean;
 
     float f_center = 457000.0f;
     float span     = 200.0f;
@@ -585,8 +589,8 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-    	fft_ready = 1;
     	fft_input_ptr = &adc_buf[0];
+    	fft_ready = 1;
     	/*
         next_tx_ptr = (uint8_t*)adc_buf;
         next_tx_len = (ADC_BUF_LEN / 2) * 2; // half-buffer (bytes)
@@ -600,8 +604,8 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-    	fft_ready = 1;
     	fft_input_ptr = &adc_buf[512];
+    	fft_ready = 1;
     	/*
     	//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
         next_tx_ptr = (uint8_t*)&adc_buf[ADC_BUF_LEN / 2];
