@@ -60,8 +60,7 @@ uint16_t adc_buf[ADC_BUF_LEN];
 volatile uint8_t uart_busy = 0;
 volatile uint8_t pending_tx = 0;
 volatile uint8_t fft_ready = 0;
-
-uint16_t* fft_input_ptr = NULL;
+volatile uint16_t* fft_input_ptr = NULL;
 uint8_t* next_tx_ptr;
 uint16_t next_tx_len;
 
@@ -136,7 +135,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_Delay(500);
   HAL_TIM_Base_Start(&htim6);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
 
@@ -151,6 +150,24 @@ int main(void)
 	    {
 	        fft_ready = 0;
 	        run_czt_on_adc_block();
+	        HAL_ADC_Stop_DMA(&hadc1);
+	        for (uint32_t i = 0; i < CZT_N; i++) {
+	            char buf[16];
+	            int len = snprintf(buf, sizeof(buf), "%u\n", adc_buf[i]);
+	            HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+	        }
+	        for (uint32_t k = 0; k < CZT_M; k++) {
+	            float mag = sqrtf(
+	                czt_out_real[k]*czt_out_real[k] +
+	                czt_out_imag[k]*czt_out_imag[k]);
+
+	            char buf[32];
+	            int len = snprintf(buf, sizeof(buf),
+	                               "BIN %lu %.6f\n",
+	                               (unsigned long)k, mag);
+	            HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+	        }
+	        while(1);
 	    }
     /* USER CODE BEGIN 3 */
   }
@@ -414,8 +431,6 @@ void czt_fft(const float *x,
         czt_y_imag[i] = 0.0f;
     }
 
-    float a_abs2 = a_real * a_real + a_imag * a_imag;
-    float w_abs2 = w_real * w_real + w_imag * w_imag;
     float a_arg  = atan2f(a_imag, a_real);
     float w_arg  = atan2f(w_imag, w_real);
 
@@ -423,17 +438,10 @@ void czt_fft(const float *x,
     {
         float rn = (float)n_idx;
 
-        float a_mag = powf(a_abs2, -0.5f * rn);
-        float a_ang = -rn * a_arg;
+        float ang = (-rn * a_arg) + (0.5f * rn * rn * w_arg);
 
-        float w_mag = powf(w_abs2, 0.5f * rn * rn);
-        float w_ang = 0.5f * rn * rn * w_arg;
-
-        float ang = a_ang + w_ang;
-        float mag = a_mag * w_mag;
-
-        float c_real = mag * arm_cos_f32(ang);
-        float c_imag = mag * arm_sin_f32(ang);
+        float c_real = arm_cos_f32(ang);
+        float c_imag = arm_sin_f32(ang);
 
         czt_y_real[n_idx] = x[n_idx] * c_real;
         czt_y_imag[n_idx] = x[n_idx] * c_imag;
@@ -448,21 +456,19 @@ void czt_fft(const float *x,
     for (uint32_t k = 0; k < M; k++)
     {
         float rk = (float)k;
-        float mag = powf(w_abs2, -0.5f * rk * rk);
         float ang = -0.5f * rk * rk * w_arg;
 
-        czt_v_real[k] = mag * arm_cos_f32(ang);
-        czt_v_imag[k] = mag * arm_sin_f32(ang);
+        czt_v_real[k] = arm_cos_f32(ang);
+        czt_v_imag[k] = arm_sin_f32(ang);
     }
 
     for (uint32_t k = 1; k < N; k++)
     {
         float rk = (float)k;
-        float mag = powf(w_abs2, -0.5f * rk * rk);
         float ang = -0.5f * rk * rk * w_arg;
 
-        czt_v_real[L - k] = mag * arm_cos_f32(ang);
-        czt_v_imag[L - k] = mag * arm_sin_f32(ang);
+        czt_v_real[L - k] = arm_cos_f32(ang);
+        czt_v_imag[L - k] = arm_sin_f32(ang);
     }
 
     // 3) FFT(y), FFT(v)
@@ -501,11 +507,10 @@ void czt_fft(const float *x,
     for (uint32_t k = 0; k < M; k++)
     {
         float rk = (float)k;
-        float mag = powf(w_abs2, 0.5f * rk * rk);
         float ang = 0.5f * rk * rk * w_arg;
 
-        float c_real = mag * arm_cos_f32(ang);
-        float c_imag = mag * arm_sin_f32(ang);
+        float c_real = arm_cos_f32(ang);
+        float c_imag = arm_sin_f32(ang);
 
         float Gr = czt_G[2*k];
         float Gi = czt_G[2*k+1];
@@ -565,15 +570,6 @@ void run_czt_on_adc_block(void)
         }
     }
 
-    // 5) peak bin -> freq
-    float bin_df = (f_end - f_start) / (float)CZT_M;
-    float peak_freq = f_start + bin_df * (float)max_idx;
-
-    char msg[80];
-    int len = snprintf(msg, sizeof(msg),
-                       "CZT peak around %.1f Hz (bin %lu)\r\n",
-                       peak_freq, (unsigned long)max_idx);
-    HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, HAL_MAX_DELAY);
 }
 /*
 void UART_TryStartTx(void)
@@ -602,6 +598,7 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
+#if 0
     if (hadc->Instance == ADC1)
     {
     	fft_input_ptr = &adc_buf[512];
@@ -614,6 +611,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 
         UART_TryStartTx();*/
     }
+#endif
 }
 /*
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
