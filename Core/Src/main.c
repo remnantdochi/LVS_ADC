@@ -149,22 +149,26 @@ int main(void)
 	    if (fft_ready)
 	    {
 	        fft_ready = 0;
-	        run_czt_on_adc_block();
 	        HAL_ADC_Stop_DMA(&hadc1);
+	        run_czt_on_adc_block();
+
 	        for (uint32_t i = 0; i < CZT_N; i++) {
 	            char buf[16];
 	            int len = snprintf(buf, sizeof(buf), "%u\n", adc_buf[i]);
 	            HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
 	        }
+
 	        for (uint32_t k = 0; k < CZT_M; k++) {
 	            float mag = sqrtf(
 	                czt_out_real[k]*czt_out_real[k] +
 	                czt_out_imag[k]*czt_out_imag[k]);
 
-	            char buf[32];
+	            char buf[64];
 	            int len = snprintf(buf, sizeof(buf),
-	                               "BIN %lu %.6f\n",
-	                               (unsigned long)k, mag);
+	                              "af[%lu] = %.6f %.6f\n",
+	                               (unsigned long)k,
+	                               czt_out_real[k],
+	                               czt_out_imag[k]);
 	            HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
 	        }
 	        while(1);
@@ -519,6 +523,7 @@ void czt_fft(const float *x,
         out_imag[k] = Gr * c_imag + Gi * c_real;
     }
 }
+
 
 void run_czt_on_adc_block(void)
 {
