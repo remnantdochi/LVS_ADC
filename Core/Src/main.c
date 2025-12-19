@@ -37,9 +37,9 @@
 #define ADC_BUF_LEN 	1024
 #define SAMPLE_RATE_HZ	1000000.0f
 
-#define CZT_N			512U
+#define CZT_N			1024U
 #define CZT_M			128U
-#define CZT_L			1024U
+#define CZT_L			2048U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -65,16 +65,12 @@ uint16_t* fft_input_ptr = NULL;
 uint8_t* next_tx_ptr;
 uint16_t next_tx_len;
 
-// --- CZT working buffers (fixed size, no malloc) ---
-float czt_y_real[CZT_L];
-float czt_y_imag[CZT_L];
-float czt_v_real[CZT_L];
-float czt_v_imag[CZT_L];
-float czt_Y[2 * CZT_L];   // interleaved complex
-float czt_V[2 * CZT_L];
-float czt_G[2 * CZT_L];
-float czt_out_real[CZT_M];
-float czt_out_imag[CZT_M];
+// --- CZT working buffers ---
+static float czt_x[CZT_N];
+static float czt_fft_buf[2*CZT_L];
+static float czt_kernel_buf[2*CZT_L];
+static float czt_out_real[CZT_M];
+static float czt_out_imag[CZT_M];
 
 /* USER CODE END PV */
 
@@ -151,19 +147,19 @@ int main(void)
 	    {
 	        fft_ready = 0;
 	        char buf[128];
-          int len = snprintf(buf, sizeof(buf), "\n=== ADC Block ===\n");
-          HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-	        HAL_ADC_Stop_DMA(&hadc1);
-	        for (uint32_t i = 0; i < CZT_N; i++) {
-	            len = snprintf(buf, sizeof(buf),
-                       "adc[%lu] = %u\n",
-                       (unsigned long)i,
-                       adc_buf[i]);
-	            HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-	        }
-
-          run_czt_on_adc_block();
+			int len = snprintf(buf, sizeof(buf), "\n=== ADC Block ===\n");
+			HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			HAL_ADC_Stop_DMA(&hadc1);
+			for (uint32_t i = 0; i < CZT_N; i++) {
+				len = snprintf(buf, sizeof(buf),
+					   "adc[%lu] = %u\n",
+					   (unsigned long)i,
+					   adc_buf[i]);
+				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			}
+			run_czt_on_adc_block();
 	        while(1);
+	        //HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
 	    }
     /* USER CODE BEGIN 3 */
   }
@@ -423,8 +419,8 @@ void czt_fft(const float *x,
 
     // 1) y[n] = x[n] * a^{-n} * w^{n^2/2}
     for (uint32_t i = 0; i < L; i++) {
-        czt_y_real[i] = 0.0f;
-        czt_y_imag[i] = 0.0f;
+    	czt_fft_buf[2*i]   = 0.0f;
+    	czt_fft_buf[2*i+1] = 0.0f;
     }
 
     float a_arg  = atan2f(a_imag, a_real);
@@ -439,42 +435,42 @@ void czt_fft(const float *x,
         float c_real = arm_cos_f32(ang);
         float c_imag = arm_sin_f32(ang);
 
-        czt_y_real[n_idx] = x[n_idx] * c_real;
-        czt_y_imag[n_idx] = x[n_idx] * c_imag;
+        czt_fft_buf[2*n_idx]   = x[n_idx] * c_real;
+        czt_fft_buf[2*n_idx+1] = x[n_idx] * c_imag;
     }
 
     char buf[64];
-    int len = snprintf(buf, sizeof(buf), "\n=== stage0 input ===\n");
-    HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+	int len = snprintf(buf, sizeof(buf), "\n=== stage0 input ===\n");
+	HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
 
-    for (uint32_t i = 0; i < N; i++)
-    {
-        char buf[128];
-        int len = snprintf(buf, sizeof(buf),
-                           "x[%lu] = %.6f\n",
-                           (unsigned long)i,
-                           x[i]);
-        HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-    }
+	for (uint32_t i = 0; i < N; i++)
+	{
+		char buf[128];
+		int len = snprintf(buf, sizeof(buf),
+						   "x[%lu] = %.6f\n",
+						   (unsigned long)i,
+						   x[i]);
+		HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+	}
 
-    len = snprintf(buf, sizeof(buf), "\n=== stage1 ===\n");
-    HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+	len = snprintf(buf, sizeof(buf), "\n=== stage1 ===\n");
+	HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
 
-    // 디버깅 Stage 1: y[n] 일부 UART 출력 (n=0~9)
-    for (uint32_t i = 0; i < N; i++)
-    {
-        len = snprintf(buf, sizeof(buf),
-                           "y[%lu] = %.6f %.6f\n",
-                           (unsigned long)i,
-                           czt_y_real[i],
-                           czt_y_imag[i]);
-        HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-    }
+	// 디버깅 Stage 1: y[n]
+	for (uint32_t i = 0; i < N; i++)
+	{
+		len = snprintf(buf, sizeof(buf),
+						   "y[%lu] = %.6f %.6f\n",
+						   (unsigned long)i,
+						   czt_fft_buf[2*i],
+						   czt_fft_buf[2*i+1]);
+		HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+	}
 
     // 2) convolution kernel v
     for (uint32_t i = 0; i < L; i++) {
-        czt_v_real[i] = 0.0f;
-        czt_v_imag[i] = 0.0f;
+    	czt_kernel_buf[2*i]   = 0.0f;
+    	czt_kernel_buf[2*i+1] = 0.0f;
     }
 
     for (uint32_t k = 0; k < M; k++)
@@ -482,8 +478,8 @@ void czt_fft(const float *x,
         float rk = (float)k;
         float ang = -0.5f * rk * rk * w_arg;
 
-        czt_v_real[k] = arm_cos_f32(ang);
-        czt_v_imag[k] = arm_sin_f32(ang);
+        czt_kernel_buf[2*k]     = arm_cos_f32(ang);
+        czt_kernel_buf[2*k+1] = arm_sin_f32(ang);
     }
 
     for (uint32_t k = 1; k < N; k++)
@@ -491,8 +487,24 @@ void czt_fft(const float *x,
         float rk = (float)k;
         float ang = -0.5f * rk * rk * w_arg;
 
-        czt_v_real[L - k] = arm_cos_f32(ang);
-        czt_v_imag[L - k] = arm_sin_f32(ang);
+        czt_kernel_buf[2*(L - k)]     = arm_cos_f32(ang);
+        czt_kernel_buf[2*(L - k) + 1] = arm_sin_f32(ang);
+
+    }
+
+    len = snprintf(buf, sizeof(buf), "\n=== stage2 ===\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+
+    // 디버깅 Stage 2: v[k] 일부 UART 출력 (k=0~9)
+    for (uint32_t i = 0; i < L; i++)
+    {
+        char buf[128];
+        int len = snprintf(buf, sizeof(buf),
+                           "v[%lu] = %.6f %.6f\n",
+                           (unsigned long)i,
+                           czt_kernel_buf[2*i],
+                           czt_kernel_buf[2*i+1]);
+        HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
     }
 
     len = snprintf(buf, sizeof(buf), "\n=== stage2 ===\n");
@@ -511,23 +523,14 @@ void czt_fft(const float *x,
     }
 
     // 3) FFT(y), FFT(v)
-    arm_cfft_radix4_instance_f32 fft_inst;
-    arm_cfft_radix4_init_f32(&fft_inst, L, 0, 1);
+    arm_cfft_radix2_instance_f32 fft_inst;
+    arm_cfft_radix2_init_f32(&fft_inst, L, 0, 1);
 
-    for (uint32_t i = 0; i < L; i++)
-    {
-        czt_Y[2*i]   = czt_y_real[i];
-        czt_Y[2*i+1] = czt_y_imag[i];
-
-        czt_V[2*i]   = czt_v_real[i];
-        czt_V[2*i+1] = czt_v_imag[i];
-    }
+    arm_cfft_radix2_f32(&fft_inst, czt_fft_buf);
+    arm_cfft_radix2_f32(&fft_inst, czt_kernel_buf);
 
     len = snprintf(buf, sizeof(buf), "\n=== stage3: FFT(Y), FFT(V) ===\n");
     HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-
-    arm_cfft_radix4_f32(&fft_inst, czt_Y);
-    arm_cfft_radix4_f32(&fft_inst, czt_V);
 
     for (uint32_t i = 0; i < L; i++)
     {
@@ -535,25 +538,36 @@ void czt_fft(const float *x,
         int len = snprintf(buf, sizeof(buf),
                            "Y[%lu] = %.6f %.6f , V[%lu] = %.6f %.6f\n",
                            (unsigned long)i,
-                           czt_Y[2*i], czt_Y[2*i+1],
+                           czt_fft_buf[2*i], czt_fft_buf[2*i+1],
                            (unsigned long)i,
-                           czt_V[2*i], czt_V[2*i+1]);
+                           czt_kernel_buf[2*i], czt_kernel_buf[2*i+1]);
         HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+    }
+
+    // Multiply G = Y * V
+    for (uint32_t i = 0; i < L; i++)
+    {
+        float Yr = czt_fft_buf[2*i];
+        float Yi = czt_fft_buf[2*i+1];
+        float Vr = czt_kernel_buf[2*i];
+        float Vi = czt_kernel_buf[2*i+1];
+
+        czt_fft_buf[2*i]   = Yr * Vr - Yi * Vi;
+        czt_fft_buf[2*i+1] = Yr * Vi + Yi * Vr;
     }
 
     len = snprintf(buf, sizeof(buf), "\n=== stage3: G = Y*V ===\n");
     HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
 
-    // Multiply G = Y * V
     for (uint32_t i = 0; i < L; i++)
     {
-        float Yr = czt_Y[2*i];
-        float Yi = czt_Y[2*i+1];
-        float Vr = czt_V[2*i];
-        float Vi = czt_V[2*i+1];
-
-        czt_G[2*i]   = Yr * Vr - Yi * Vi;
-        czt_G[2*i+1] = Yr * Vi + Yi * Vr;
+        char buf[128];
+        int len = snprintf(buf, sizeof(buf),
+                           "G[%lu] = %.6f %.6f\n",
+                           (unsigned long)i,
+                           czt_fft_buf[2*i],
+                           czt_fft_buf[2*i+1]);
+        HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
     }
 
     for (uint32_t i = 0; i < L; i++)
@@ -568,8 +582,23 @@ void czt_fft(const float *x,
     }
 
     // IFFT(G)
-    arm_cfft_radix4_init_f32(&fft_inst, L, 1, 1);
-    arm_cfft_radix4_f32(&fft_inst, czt_G);
+    arm_cfft_radix2_init_f32(&fft_inst, L, 1, 1);
+    arm_cfft_radix2_f32(&fft_inst, czt_fft_buf);
+
+    len = snprintf(buf, sizeof(buf), "\n=== stage3: IFFT(G) ===\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+
+    for (uint32_t i = 0; i < L; i++)
+    {
+        char buf[128];
+        int len = snprintf(buf, sizeof(buf),
+                            "g[%lu] = %.6f %.6f\n",
+                            (unsigned long)i,
+                            czt_fft_buf[2*i],
+                            czt_fft_buf[2*i+1]);
+        HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+    }
+
 
     len = snprintf(buf, sizeof(buf), "\n=== stage3: IFFT(G) ===\n");
     HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
@@ -595,8 +624,8 @@ void czt_fft(const float *x,
         float c_real = arm_cos_f32(ang);
         float c_imag = arm_sin_f32(ang);
 
-        float Gr = czt_G[2*k];
-        float Gi = czt_G[2*k+1];
+        float Gr = czt_fft_buf[2*k];
+        float Gi = czt_fft_buf[2*k+1];
 
         out_real[k] = Gr * c_real - Gi * c_imag;
         out_imag[k] = Gr * c_imag + Gi * c_real;
@@ -618,10 +647,24 @@ void czt_fft(const float *x,
 
 }
 
+    len = snprintf(buf, sizeof(buf), "\n=== stage4 ===\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+
+    for (uint32_t i = 0; i < L; i++)
+    {
+        char buf[128];
+        int len = snprintf(buf, sizeof(buf),
+                           "X[%lu] = %.6f %.6f\n",
+                           (unsigned long)i,
+                           out_real[i],
+                           out_imag[i]);
+        HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+    }
+
+}
+
 void run_czt_on_adc_block(void)
 {
-    static float x[CZT_N];
-
     if (fft_input_ptr == NULL)
             return;
 
@@ -632,7 +675,7 @@ void run_czt_on_adc_block(void)
     mean /= (float)CZT_N;
 
     for (uint32_t i = 0; i < CZT_N; i++)
-        x[i] = (float)fft_input_ptr[i] - mean;
+        czt_x[i] = (float)fft_input_ptr[i] - mean;
 
     float f_center = 457000.0f;
     float span     = 200.0f;
@@ -647,7 +690,10 @@ void run_czt_on_adc_block(void)
     float A_real = arm_cos_f32(A_ang);
     float A_imag = arm_sin_f32(A_ang);
 
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
     char buf[128];
     int len = snprintf(buf, sizeof(buf),
                         "\n=== stage0: W,A ===\n"
@@ -657,9 +703,12 @@ void run_czt_on_adc_block(void)
                         A_real, A_imag);
     HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
 
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
     // 3) CZT
-    czt_fft(x, CZT_N, CZT_M, W_real, W_imag, A_real, A_imag,
+    czt_fft(czt_x, CZT_N, CZT_M, W_real, W_imag, A_real, A_imag,
             czt_out_real, czt_out_imag);
 
     // 4) peak identify
@@ -695,7 +744,7 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
     if (hadc->Instance == ADC1)
     {
     	fft_input_ptr = &adc_buf[0];
-    	fft_ready = 1;
+
     	/*
         next_tx_ptr = (uint8_t*)adc_buf;
         next_tx_len = (ADC_BUF_LEN / 2) * 2; // half-buffer (bytes)
@@ -707,10 +756,9 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-#if 0
     if (hadc->Instance == ADC1)
     {
-    	fft_input_ptr = &adc_buf[512];
+    	//fft_input_ptr = &adc_buf[512];
     	fft_ready = 1;
     	/*
     	//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
@@ -720,7 +768,6 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 
         UART_TryStartTx();*/
     }
-#endif
 }
 /*
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
