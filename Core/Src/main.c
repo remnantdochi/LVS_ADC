@@ -35,7 +35,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define ADC_BUF_LEN 	1024
-#define SAMPLE_RATE_HZ	1000000.0f
+#define SAMPLE_RATE_HZ	25000.0f
 
 #define CZT_N			1024U
 #define CZT_M			128U
@@ -131,12 +131,13 @@ int main(void)
   MX_USART1_UART_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
-  HAL_Delay(500);
   HAL_TIM_Base_Start(&htim6);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
+
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CYCCNT = 0;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
 
   /* USER CODE END 2 */
 
@@ -144,46 +145,45 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  if (fft_ready)
+	  {
+			fft_ready = 0;
+			HAL_ADC_Stop_DMA(&hadc1);
+			uint32_t c0 = DWT->CYCCNT;
+			run_czt_on_adc_block();
+			uint32_t c1 = DWT->CYCCNT;
+			uint32_t cycles = c1-c0;
+			float time_us = (float)cycles / 170.0f; //170Mhz -> us
+			char buf[32];
+			int len = snprintf(buf, sizeof(buf), "cycle %lu time %.2f\n", cycles, time_us);
+			HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+
+			/*
+
+			for (uint32_t i = 0; i < CZT_N; i++) {
+				char buf[16];
+				int len = snprintf(buf, sizeof(buf), "%u\n", adc_buf[i]);
+				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			}
+
+			for (uint32_t k = 0; k < CZT_M; k++) {
+				float mag = sqrtf(
+					czt_out_real[k]*czt_out_real[k] +
+					czt_out_imag[k]*czt_out_imag[k]);
+
+				char buf[64];
+				int len = snprintf(buf, sizeof(buf),
+								  "af[%lu] = %.6f %.6f\n",
+								   (unsigned long)k,
+								   czt_out_real[k],
+								   czt_out_imag[k]);
+				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			}*/
+			while(1);
+
+	  }
     /* USER CODE END WHILE */
-	    if (fft_ready)
-	    {
-	        fft_ready = 0;
-	        HAL_ADC_Stop_DMA(&hadc1);
-	        uint32_t c0 = DWT->CYCCNT;
-	        run_czt_on_adc_block();
-	        uint32_t c1 = DWT->CYCCNT;
 
-	        uint32_t cycles = c1 - c0;
-	        float time_us = (float)cycles / 170.0f; // 170 MHz → µs
-
-	        char buf[32];
-	        int len = snprintf(buf, sizeof(buf), "cycle %lu time %.2f\n", cycles, time_us);
-	        HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-
-	        /*
-
-	        for (uint32_t i = 0; i < CZT_N; i++) {
-	            char buf[16];
-	            int len = snprintf(buf, sizeof(buf), "%u\n", adc_buf[i]);
-	            HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-	        }
-
-	        for (uint32_t k = 0; k < CZT_M; k++) {
-	            float mag = sqrtf(
-	                czt_out_real[k]*czt_out_real[k] +
-	                czt_out_imag[k]*czt_out_imag[k]);
-
-	            char buf[64];
-	            int len = snprintf(buf, sizeof(buf),
-	                              "af[%lu] = %.6f %.6f\n",
-	                               (unsigned long)k,
-	                               czt_out_real[k],
-	                               czt_out_imag[k]);
-	            HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-	        }*/
-	        while(1);
-	        //HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
-	    }
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -320,9 +320,9 @@ static void MX_TIM6_Init(void)
 
   /* USER CODE END TIM6_Init 1 */
   htim6.Instance = TIM6;
-  htim6.Init.Prescaler = 0;
+  htim6.Init.Prescaler = 67;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim6.Init.Period = 169;
+  htim6.Init.Period = 99;
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
@@ -560,28 +560,12 @@ void run_czt_on_adc_block(void)
             czt_out_real, czt_out_imag);
 
 }
-/*
-void UART_TryStartTx(void)
-{
-    if (!uart_busy && pending_tx) {
-        uart_busy = 1;
-        pending_tx = 0;
-        HAL_UART_Transmit_IT(&huart1, next_tx_ptr, next_tx_len);
-    }
-}*/
 
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
     	fft_input_ptr = &adc_buf[0];
-
-    	/*
-        next_tx_ptr = (uint8_t*)adc_buf;
-        next_tx_len = (ADC_BUF_LEN / 2) * 2; // half-buffer (bytes)
-        pending_tx = 1;
-
-        UART_TryStartTx();*/
     }
 }
 
@@ -589,26 +573,10 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-    	//fft_input_ptr = &adc_buf[512];
     	fft_ready = 1;
-    	/*
-    	//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
-        next_tx_ptr = (uint8_t*)&adc_buf[ADC_BUF_LEN / 2];
-        next_tx_len = (ADC_BUF_LEN / 2) * 2;
-        pending_tx = 1;
-
-        UART_TryStartTx();*/
     }
 }
-/*
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART1)
-    {
-        uart_busy = 0;
-        UART_TryStartTx();
-    }
-}*/
+
 /* USER CODE END 4 */
 
 /**
