@@ -37,9 +37,9 @@
 #define ADC_BUF_LEN 	1024
 #define SAMPLE_RATE_HZ	1000000.0f
 
-#define CZT_N			512U
+#define CZT_N			1024U
 #define CZT_M			128U
-#define CZT_L			1024U
+#define CZT_L			2048U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -64,16 +64,12 @@ volatile uint16_t* fft_input_ptr = NULL;
 uint8_t* next_tx_ptr;
 uint16_t next_tx_len;
 
-// --- CZT working buffers (fixed size, no malloc) ---
-float czt_y_real[CZT_L];
-float czt_y_imag[CZT_L];
-float czt_v_real[CZT_L];
-float czt_v_imag[CZT_L];
-float czt_Y[2 * CZT_L];   // interleaved complex
-float czt_V[2 * CZT_L];
-float czt_G[2 * CZT_L];
-float czt_out_real[CZT_M];
-float czt_out_imag[CZT_M];
+// --- CZT working buffers ---
+static float czt_x[CZT_N];
+static float czt_fft_buf[2*CZT_L];
+static float czt_kernel_buf[2*CZT_L];
+static float czt_out_real[CZT_M];
+static float czt_out_imag[CZT_M];
 
 /* USER CODE END PV */
 
@@ -138,6 +134,9 @@ int main(void)
   HAL_Delay(500);
   HAL_TIM_Base_Start(&htim6);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
   /* USER CODE END 2 */
 
@@ -150,7 +149,18 @@ int main(void)
 	    {
 	        fft_ready = 0;
 	        HAL_ADC_Stop_DMA(&hadc1);
+	        uint32_t c0 = DWT->CYCCNT;
 	        run_czt_on_adc_block();
+	        uint32_t c1 = DWT->CYCCNT;
+
+	        uint32_t cycles = c1 - c0;
+	        float time_us = (float)cycles / 170.0f; // 170 MHz → µs
+
+	        char buf[32];
+	        int len = snprintf(buf, sizeof(buf), "cycle %lu time %.2f\n", cycles, time_us);
+	        HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+
+	        /*
 
 	        for (uint32_t i = 0; i < CZT_N; i++) {
 	            char buf[16];
@@ -170,8 +180,9 @@ int main(void)
 	                               czt_out_real[k],
 	                               czt_out_imag[k]);
 	            HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-	        }
+	        }*/
 	        while(1);
+	        //HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
 	    }
     /* USER CODE BEGIN 3 */
   }
@@ -431,8 +442,8 @@ void czt_fft(const float *x,
 
     // 1) y[n] = x[n] * a^{-n} * w^{n^2/2}
     for (uint32_t i = 0; i < L; i++) {
-        czt_y_real[i] = 0.0f;
-        czt_y_imag[i] = 0.0f;
+    	czt_fft_buf[2*i]   = 0.0f;
+    	czt_fft_buf[2*i+1] = 0.0f;
     }
 
     float a_arg  = atan2f(a_imag, a_real);
@@ -447,14 +458,14 @@ void czt_fft(const float *x,
         float c_real = arm_cos_f32(ang);
         float c_imag = arm_sin_f32(ang);
 
-        czt_y_real[n_idx] = x[n_idx] * c_real;
-        czt_y_imag[n_idx] = x[n_idx] * c_imag;
+        czt_fft_buf[2*n_idx]   = x[n_idx] * c_real;
+        czt_fft_buf[2*n_idx+1] = x[n_idx] * c_imag;
     }
 
     // 2) convolution kernel v
     for (uint32_t i = 0; i < L; i++) {
-        czt_v_real[i] = 0.0f;
-        czt_v_imag[i] = 0.0f;
+    	czt_kernel_buf[2*i]   = 0.0f;
+    	czt_kernel_buf[2*i+1] = 0.0f;
     }
 
     for (uint32_t k = 0; k < M; k++)
@@ -462,8 +473,8 @@ void czt_fft(const float *x,
         float rk = (float)k;
         float ang = -0.5f * rk * rk * w_arg;
 
-        czt_v_real[k] = arm_cos_f32(ang);
-        czt_v_imag[k] = arm_sin_f32(ang);
+        czt_kernel_buf[2*k]     = arm_cos_f32(ang);
+        czt_kernel_buf[2*k+1] = arm_sin_f32(ang);
     }
 
     for (uint32_t k = 1; k < N; k++)
@@ -471,41 +482,33 @@ void czt_fft(const float *x,
         float rk = (float)k;
         float ang = -0.5f * rk * rk * w_arg;
 
-        czt_v_real[L - k] = arm_cos_f32(ang);
-        czt_v_imag[L - k] = arm_sin_f32(ang);
+        czt_kernel_buf[2*(L - k)]     = arm_cos_f32(ang);
+        czt_kernel_buf[2*(L - k) + 1] = arm_sin_f32(ang);
+
     }
 
     // 3) FFT(y), FFT(v)
-    arm_cfft_radix4_instance_f32 fft_inst;
-    arm_cfft_radix4_init_f32(&fft_inst, L, 0, 1);
+    arm_cfft_radix2_instance_f32 fft_inst;
+    arm_cfft_radix2_init_f32(&fft_inst, L, 0, 1);
 
-    for (uint32_t i = 0; i < L; i++)
-    {
-        czt_Y[2*i]   = czt_y_real[i];
-        czt_Y[2*i+1] = czt_y_imag[i];
-
-        czt_V[2*i]   = czt_v_real[i];
-        czt_V[2*i+1] = czt_v_imag[i];
-    }
-
-    arm_cfft_radix4_f32(&fft_inst, czt_Y);
-    arm_cfft_radix4_f32(&fft_inst, czt_V);
+    arm_cfft_radix2_f32(&fft_inst, czt_fft_buf);
+    arm_cfft_radix2_f32(&fft_inst, czt_kernel_buf);
 
     // Multiply G = Y * V
     for (uint32_t i = 0; i < L; i++)
     {
-        float Yr = czt_Y[2*i];
-        float Yi = czt_Y[2*i+1];
-        float Vr = czt_V[2*i];
-        float Vi = czt_V[2*i+1];
+        float Yr = czt_fft_buf[2*i];
+        float Yi = czt_fft_buf[2*i+1];
+        float Vr = czt_kernel_buf[2*i];
+        float Vi = czt_kernel_buf[2*i+1];
 
-        czt_G[2*i]   = Yr * Vr - Yi * Vi;
-        czt_G[2*i+1] = Yr * Vi + Yi * Vr;
+        czt_fft_buf[2*i]   = Yr * Vr - Yi * Vi;
+        czt_fft_buf[2*i+1] = Yr * Vi + Yi * Vr;
     }
 
     // IFFT(G)
-    arm_cfft_radix4_init_f32(&fft_inst, L, 1, 1);
-    arm_cfft_radix4_f32(&fft_inst, czt_G);
+    arm_cfft_radix2_init_f32(&fft_inst, L, 1, 1);
+    arm_cfft_radix2_f32(&fft_inst, czt_fft_buf);
 
     // 4) Final chirp and output
     for (uint32_t k = 0; k < M; k++)
@@ -516,8 +519,8 @@ void czt_fft(const float *x,
         float c_real = arm_cos_f32(ang);
         float c_imag = arm_sin_f32(ang);
 
-        float Gr = czt_G[2*k];
-        float Gi = czt_G[2*k+1];
+        float Gr = czt_fft_buf[2*k];
+        float Gi = czt_fft_buf[2*k+1];
 
         out_real[k] = Gr * c_real - Gi * c_imag;
         out_imag[k] = Gr * c_imag + Gi * c_real;
@@ -527,8 +530,6 @@ void czt_fft(const float *x,
 
 void run_czt_on_adc_block(void)
 {
-    static float x[CZT_N];
-
     if (fft_input_ptr == NULL)
             return;
 
@@ -539,7 +540,7 @@ void run_czt_on_adc_block(void)
     mean /= (float)CZT_N;
 
     for (uint32_t i = 0; i < CZT_N; i++)
-        x[i] = (float)fft_input_ptr[i] - mean;
+        czt_x[i] = (float)fft_input_ptr[i] - mean;
 
     float f_center = 457000.0f;
     float span     = 200.0f;
@@ -555,25 +556,8 @@ void run_czt_on_adc_block(void)
     float A_imag = arm_sin_f32(A_ang);
 
     // 3) CZT
-    czt_fft(x, CZT_N, CZT_M, W_real, W_imag, A_real, A_imag,
+    czt_fft(czt_x, CZT_N, CZT_M, W_real, W_imag, A_real, A_imag,
             czt_out_real, czt_out_imag);
-
-    // 4) peak identify
-    float max_val = 0.0f;
-    uint32_t max_idx = 0;
-
-    for (uint32_t k = 0; k < CZT_M; k++)
-    {
-        float re = czt_out_real[k];
-        float im = czt_out_imag[k];
-        float m  = sqrtf(re*re + im*im);
-
-        if (m > max_val)
-        {
-            max_val = m;
-            max_idx = k;
-        }
-    }
 
 }
 /*
@@ -591,7 +575,7 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
     if (hadc->Instance == ADC1)
     {
     	fft_input_ptr = &adc_buf[0];
-    	fft_ready = 1;
+
     	/*
         next_tx_ptr = (uint8_t*)adc_buf;
         next_tx_len = (ADC_BUF_LEN / 2) * 2; // half-buffer (bytes)
@@ -603,10 +587,9 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-#if 0
     if (hadc->Instance == ADC1)
     {
-    	fft_input_ptr = &adc_buf[512];
+    	//fft_input_ptr = &adc_buf[512];
     	fft_ready = 1;
     	/*
     	//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
@@ -616,7 +599,6 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 
         UART_TryStartTx();*/
     }
-#endif
 }
 /*
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
