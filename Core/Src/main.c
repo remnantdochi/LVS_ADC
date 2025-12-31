@@ -51,6 +51,8 @@
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
+CORDIC_HandleTypeDef hcordic;
+
 TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
@@ -80,6 +82,7 @@ static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM6_Init(void);
+static void MX_CORDIC_Init(void);
 /* USER CODE BEGIN PFP */
 void czt_fft(const float *x,
              uint32_t n,
@@ -130,6 +133,7 @@ int main(void)
   MX_ADC1_Init();
   MX_USART1_UART_Init();
   MX_TIM6_Init();
+  MX_CORDIC_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start(&htim6);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
@@ -299,6 +303,32 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief CORDIC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CORDIC_Init(void)
+{
+
+  /* USER CODE BEGIN CORDIC_Init 0 */
+
+  /* USER CODE END CORDIC_Init 0 */
+
+  /* USER CODE BEGIN CORDIC_Init 1 */
+
+  /* USER CODE END CORDIC_Init 1 */
+  hcordic.Instance = CORDIC;
+  if (HAL_CORDIC_Init(&hcordic) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CORDIC_Init 2 */
+
+  /* USER CODE END CORDIC_Init 2 */
 
 }
 
