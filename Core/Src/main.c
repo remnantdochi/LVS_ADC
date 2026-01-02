@@ -40,11 +40,40 @@
 #define CZT_N			1024U
 #define CZT_M			128U
 #define CZT_L			2048U
+
+#define TWO_PI      		(2.0f * PI)
+#define INV_TWO_PI  		(0.15915494309189533577f)  // 1 / (2*pi)
+#define CORDIC_SCALE_IN  	(2147483648.0f / 3.14159265358979323846f) // 2^31 / PI
+#define CORDIC_SCALE_OUT 	(4.656612873077392578125e-10f)            // 1 / 2^31
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+static inline float wrap_pm_pi(float x) //fmodf
+{
+    // Fast wrap to [-pi, pi]
+    int32_t k = (int32_t)(x * INV_TWO_PI + (x >= 0.0f ? 0.5f : -0.5f));
+    x -= k * TWO_PI;
+    if (x > PI)  x -= TWO_PI;
+    if (x < -PI) x += TWO_PI;
+    return x;
+}
 
+static inline void cordic_sincos_f32(float angle, float *cos_val, float *sin_val)
+{
+    float ang_wrapped = wrap_pm_pi(angle);
+
+    // Float -> Fixed Point (Q31) : [-Pi, Pi] -> [-1, 1]
+    int32_t in = (int32_t)(ang_wrapped * CORDIC_SCALE_IN);
+
+    CORDIC->WDATA = in;
+
+    int32_t out_sin = (int32_t)CORDIC->RDATA;
+    int32_t out_cos = (int32_t)CORDIC->RDATA;
+
+    *sin_val = (float)out_sin * CORDIC_SCALE_OUT;
+    *cos_val = (float)out_cos * CORDIC_SCALE_OUT;
+}
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -97,6 +126,7 @@ void run_czt_on_adc_block(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
 
 /* USER CODE END 0 */
 
@@ -321,13 +351,27 @@ static void MX_CORDIC_Init(void)
   /* USER CODE BEGIN CORDIC_Init 1 */
 
   /* USER CODE END CORDIC_Init 1 */
+  __HAL_RCC_CORDIC_CLK_ENABLE();
+
   hcordic.Instance = CORDIC;
   if (HAL_CORDIC_Init(&hcordic) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN CORDIC_Init 2 */
+  CORDIC_ConfigTypeDef sConfig = {0};
+  sConfig.Function  = CORDIC_FUNCTION_SINE;     // sin/cos 모드
+  sConfig.Precision = CORDIC_PRECISION_6CYCLES; // 속도/정확도 트레이드오프
+  sConfig.NbWrite   = CORDIC_NBWRITE_1;         // 입력 각 1개
+  sConfig.NbRead    = CORDIC_NBREAD_2;          // sin, cos
+  sConfig.InSize    = CORDIC_INSIZE_32BITS;
+  sConfig.OutSize   = CORDIC_OUTSIZE_32BITS;
+  sConfig.Scale     = CORDIC_SCALE_0;
 
+  if (HAL_CORDIC_Configure(&hcordic, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END CORDIC_Init 2 */
 
 }
@@ -485,8 +529,10 @@ void czt_fft(const float *x,
 
         float ang = (-rn * a_arg) + (0.5f * rn * rn * w_arg);
 
-        float c_real = arm_cos_f32(ang);
-        float c_imag = arm_sin_f32(ang);
+        //float c_real = arm_cos_f32(ang);
+        //float c_imag = arm_sin_f32(ang);
+        float c_real, c_imag;
+        cordic_sincos_f32(ang, &c_real, &c_imag);
 
         czt_fft_buf[2*n_idx]   = x[n_idx] * c_real;
         czt_fft_buf[2*n_idx+1] = x[n_idx] * c_imag;
@@ -503,8 +549,12 @@ void czt_fft(const float *x,
         float rk = (float)k;
         float ang = -0.5f * rk * rk * w_arg;
 
-        czt_kernel_buf[2*k]     = arm_cos_f32(ang);
-        czt_kernel_buf[2*k+1] = arm_sin_f32(ang);
+        //czt_kernel_buf[2*k]     = arm_cos_f32(ang);
+        //czt_kernel_buf[2*k+1] = arm_sin_f32(ang);
+        float c_real, c_imag;
+        cordic_sincos_f32(ang, &c_real, &c_imag);
+        czt_kernel_buf[2*k] = c_real;
+        czt_kernel_buf[2*k+1] = c_imag;
     }
 
     for (uint32_t k = 1; k < N; k++)
@@ -512,8 +562,12 @@ void czt_fft(const float *x,
         float rk = (float)k;
         float ang = -0.5f * rk * rk * w_arg;
 
-        czt_kernel_buf[2*(L - k)]     = arm_cos_f32(ang);
-        czt_kernel_buf[2*(L - k) + 1] = arm_sin_f32(ang);
+        //czt_kernel_buf[2*(L - k)]     = arm_cos_f32(ang);
+        //czt_kernel_buf[2*(L - k) + 1] = arm_sin_f32(ang);
+        float c_real, c_imag;
+        cordic_sincos_f32(ang, &c_real, &c_imag);
+        czt_kernel_buf[2*(L-k)] = c_real;
+        czt_kernel_buf[2*(L-k)+1] = c_imag;
 
     }
 
@@ -546,8 +600,10 @@ void czt_fft(const float *x,
         float rk = (float)k;
         float ang = 0.5f * rk * rk * w_arg;
 
-        float c_real = arm_cos_f32(ang);
-        float c_imag = arm_sin_f32(ang);
+        //float c_real = arm_cos_f32(ang);
+        //float c_imag = arm_sin_f32(ang);
+        float c_real, c_imag;
+        cordic_sincos_f32(ang, &c_real, &c_imag);
 
         float Gr = czt_fft_buf[2*k];
         float Gi = czt_fft_buf[2*k+1];
