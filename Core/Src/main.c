@@ -40,6 +40,8 @@
 #define CZT_N			2048U
 #define CZT_M			512U
 #define CZT_L			4096U
+
+//#define PRINT
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -198,38 +200,21 @@ int main(void)
 	  if (fft_ready)
 	  {
 			fft_ready = 0;
-			//HAL_ADC_Stop_DMA(&hadc1);
+#ifdef PRINT
+			HAL_ADC_Stop_DMA(&hadc1);
 			uint32_t c0 = DWT->CYCCNT;
 			run_czt_on_adc_block();
 			uint32_t c1 = DWT->CYCCNT;
-#if 1
+
 			uint32_t cycles = c1-c0;
 			float time_us = (float)cycles / 170.0f; //170Mhz -> us
 			char buf[32];
 			int len = snprintf(buf, sizeof(buf), "cycle %lu time %.2f\n", cycles, time_us);
-			//HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			while(1);
 #else
-			for (uint32_t i = 0; i < CZT_N; i++) {
-				char buf[16];
-				int len = snprintf(buf, sizeof(buf), "%u\n", adc_buf[i]);
-				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-			}
-
-			for (uint32_t k = 0; k < CZT_M; k++) {
-				float mag = sqrtf(
-					czt_out_real[k]*czt_out_real[k] +
-					czt_out_imag[k]*czt_out_imag[k]);
-
-				char buf[64];
-				int len = snprintf(buf, sizeof(buf),
-								  "af[%lu] = %.6f %.6f\n",
-								   (unsigned long)k,
-								   czt_out_real[k],
-								   czt_out_imag[k]);
-				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-			}
+			run_czt_on_adc_block();
 #endif
-			//while(1);
 
 	  }
     /* USER CODE END WHILE */
