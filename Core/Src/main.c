@@ -37,9 +37,9 @@
 #define ADC_BUF_LEN 	4096
 #define SAMPLE_RATE_HZ	25000.71f
 
-#define CZT_N			2048U
-#define CZT_M			512U
-#define CZT_L			4096U
+#define CZT_N			1024U
+#define CZT_M			256U
+#define CZT_L			2048U
 
 #define CENTER_FREQ_HZ 	457000.0f
 #define SPAN_HZ			200.0f
