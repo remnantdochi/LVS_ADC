@@ -35,13 +35,16 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define ADC_BUF_LEN 	4096
-#define SAMPLE_RATE_HZ	25000.0f
+#define SAMPLE_RATE_HZ	25000.71f
 
 #define CZT_N			2048U
 #define CZT_M			512U
 #define CZT_L			4096U
 
-//#define PRINT
+#define CENTER_FREQ_HZ 	457000.0f
+#define SPAN_HZ			200.0f
+
+#define PRINT
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -92,8 +95,8 @@ void run_czt_on_adc_block(void);
 /* USER CODE BEGIN 0 */
 void init_czt_constants(void)
 {
-    float f_center = 457000.0f;
-    float span     = 200.0f;
+    float f_center = CENTER_FREQ_HZ;
+    float span     = SPAN_HZ;
     float f_start  = f_center - span * 0.5f;
     float f_end    = f_center + span * 0.5f;
 
@@ -208,9 +211,27 @@ int main(void)
 
 			uint32_t cycles = c1-c0;
 			float time_us = (float)cycles / 170.0f; //170Mhz -> us
-			char buf[32];
+			char buf[64];
 			int len = snprintf(buf, sizeof(buf), "cycle %lu time %.2f\n", cycles, time_us);
 			HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			for (uint32_t i = 0; i < CZT_N; i++) {
+				len = snprintf(buf, sizeof(buf), "%u\n", adc_buf[i]);
+				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			}
+
+			for (uint32_t k = 0; k < CZT_M; k++) {
+				float mag = sqrtf(
+					czt_out_real[k]*czt_out_real[k] +
+					czt_out_imag[k]*czt_out_imag[k]);
+
+				len = snprintf(buf, sizeof(buf),
+								  "af[%lu] = %.6f %.6f\n",
+								   (unsigned long)k,
+								   czt_out_real[k],
+								   czt_out_imag[k]);
+				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
+			}
+
 			while(1);
 #else
 			run_czt_on_adc_block();
