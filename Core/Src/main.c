@@ -34,7 +34,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define ADC_BUF_LEN 	4096
+#define ADC_BUF_LEN 	2048U
 #define SAMPLE_RATE_HZ	25000.71f
 
 #define CZT_N			1024U
@@ -45,6 +45,10 @@
 #define SPAN_HZ			200.0f
 
 #define PRINT
+#define LVS_MAGIC 0x3053564CU //'LVS0'
+#define UART_TX_RING_SIZE 16384U
+#define UART_TX_DMA_CHUNK 256U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -58,11 +62,12 @@ DMA_HandleTypeDef hdma_adc1;
 TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
 uint16_t adc_buf[ADC_BUF_LEN];
-volatile uint8_t fft_ready = 0;
-volatile uint16_t* fft_input_ptr = NULL;
+volatile uint8_t adc_ready = 0;
+volatile uint16_t* czt_input_ptr = NULL;
 
 // --- CZT working buffers ---
 static float czt_x[CZT_N];
@@ -75,6 +80,27 @@ static float pre_chirp_table[2 * CZT_N];
 static float post_chirp_table[2 * CZT_M];
 static float kernel_fft_precalc[2 * CZT_L];
 
+typedef struct __attribute__((packed)) {
+	uint32_t magic;
+	uint32_t seq;
+	uint32_t time; //TBD
+	uint32_t dropADC; //dropped ADC blocks
+	uint32_t dropFrame; //dropped frame
+	float	mag[CZT_M];
+} lvs_frame_t;
+
+static lvs_frame_t tx_frame;
+static volatile uint32_t frame_seq = 0;
+static volatile uint32_t uart_adc_drop_blocks = 0;
+static volatile uint32_t czt_busy = 0;
+
+static uint8_t uart_tx_ring[UART_TX_RING_SIZE];
+static volatile uint32_t uart_tx_w = 0;
+static volatile uint32_t uart_tx_r = 0;
+static volatile uint8_t uart_tx_in_progress = 0;
+
+static uint8_t uart_tx_dma_buf[UART_TX_DMA_CHUNK];
+static volatile uint32_t uart_tx_drop_frames = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -87,8 +113,9 @@ static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 void init_czt_constants(void);
 void czt_fft(const float *x, float *out_real, float *out_imag);
-
 void run_czt_on_adc_block(void);
+
+static void uart_queue_tx(const uint8_t *buf, uint32_t len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -200,38 +227,34 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  if (fft_ready)
+	  if (adc_ready)
 	  {
-			fft_ready = 0;
+			adc_ready = 0;
 #ifdef PRINT
+      
 			HAL_ADC_Stop_DMA(&hadc1);
+
+      czt_busy = 1;
 			uint32_t c0 = DWT->CYCCNT;
 			run_czt_on_adc_block();
 			uint32_t c1 = DWT->CYCCNT;
+      czt_busy = 0;
 
 			uint32_t cycles = c1-c0;
-			float time_us = (float)cycles / 170.0f; //170Mhz -> us
-			char buf[64];
-			int len = snprintf(buf, sizeof(buf), "cycle %lu time %.2f\n", cycles, time_us);
-			HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-			for (uint32_t i = 0; i < CZT_N; i++) {
-				len = snprintf(buf, sizeof(buf), "%u\n", adc_buf[i]);
-				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-			}
 
-			for (uint32_t k = 0; k < CZT_M; k++) {
-				float mag = sqrtf(
-					czt_out_real[k]*czt_out_real[k] +
-					czt_out_imag[k]*czt_out_imag[k]);
+      tx_frame.magic = LVS_MAGIC;
+      tx_frame.seq = frame_seq++;
+      tx_frame.time = cycles / 170000.0f; //170Mhz -> ms
+			tx_frame.dropADC = uart_adc_drop_blocks;
+      tx_frame.dropFrame = uart_tx_drop_frames;
 
-				len = snprintf(buf, sizeof(buf),
-								  "af[%lu] = %.6f %.6f\n",
-								   (unsigned long)k,
-								   czt_out_real[k],
-								   czt_out_imag[k]);
-				HAL_UART_Transmit(&huart1, (uint8_t*)buf, len, HAL_MAX_DELAY);
-			}
-
+      for (uint32_t k = 0; k < CZT_M; k++) {
+        float mag = sqrtf(
+          czt_out_real[k]*czt_out_real[k] +
+          czt_out_imag[k]*czt_out_imag[k]);
+        tx_frame.mag[k] = mag;
+      }
+      uart_queue_tx((const uint8_t*)&tx_frame, sizeof(tx_frame));
 			while(1);
 #else
 			run_czt_on_adc_block();
@@ -412,7 +435,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 2000000;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -458,6 +481,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
 
 }
 
@@ -526,7 +552,7 @@ void czt_fft(const float *x, float *out_real, float *out_imag)
 
 void run_czt_on_adc_block(void)
 {
-    uint16_t *src_buf = fft_input_ptr;
+    uint16_t *src_buf = czt_input_ptr;
 
     float mean = 0.0f;
     for (uint32_t i = 0; i < CZT_N; i++)
@@ -546,8 +572,13 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-    	fft_input_ptr = &adc_buf[0];
-    	fft_ready = 1;
+      if (czt_busy || adc_ready) 
+      {
+        uart_adc_drop_blocks++;
+        return;
+      }
+    	czt_input_ptr = &adc_buf[0];
+    	adc_ready = 1;
     }
 }
 
@@ -555,11 +586,78 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-    	fft_input_ptr = &adc_buf[CZT_N];
-    	fft_ready = 1;
+      if (czt_busy || adc_ready) 
+      {
+        uart_adc_drop_blocks++;
+        return;
+      }
+    	czt_input_ptr = &adc_buf[CZT_N];
+    	adc_ready = 1;
     }
 }
 
+//last slot is unused to distinguish full/empty
+static inline uint32_t uart_ring_used(void)
+{
+  uint32_t w = uart_tx_w, r = uart_tx_r;
+  return (w >= r) ? (w - r) : (UART_TX_RING_SIZE - (r - w));
+}
+static inline uint32_t uart_ring_free(void)
+{
+  return (UART_TX_RING_SIZE - 1u) - uart_ring_used();
+}
+
+static void uart_kick_tx(void)
+{
+  if (uart_tx_in_progress) return;
+  if (uart_tx_r == uart_tx_w) return; //empty
+
+  //read from ring into chunk
+  uint32_t n = 0;
+  while ((n < UART_TX_DMA_CHUNK) && (uart_tx_r != uart_tx_w)) {
+    uart_tx_dma_buf[n++] = uart_tx_ring[uart_tx_r];
+    uart_tx_r = (uart_tx_r + 1u) % UART_TX_RING_SIZE;
+  }
+  if (n == 0) return;
+
+  uart_tx_in_progress = 1;
+  if (HAL_UART_Transmit_DMA(&huart1, uart_tx_dma_buf, (uint16_t)n) != HAL_OK) {
+    uart_tx_r = (uart_tx_r + UART_TX_RING_SIZE - n) % UART_TX_RING_SIZE;
+    uart_tx_in_progress = 0;
+  }
+}
+
+static void uart_queue_tx(const uint8_t *buf, uint32_t len)
+{
+  if (!buf || !len) return;
+
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+
+  uint32_t free = uart_ring_free();
+  if (free < len) {
+    uart_tx_drop_frames += (len - free);
+    
+  }
+
+  //copy into ring
+  for (uint32_t i = 0; i < len; i++) {
+    uart_tx_ring[uart_tx_w] = buf[i];
+    uart_tx_w = (uart_tx_w + 1u) % UART_TX_RING_SIZE;
+  }
+
+  if (!primask) __enable_irq();
+
+  uart_kick_tx();
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1) {
+    uart_tx_in_progress = 0;
+    uart_kick_tx();
+  }
+}
 /* USER CODE END 4 */
 
 /**
