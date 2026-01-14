@@ -83,7 +83,7 @@ static float kernel_fft_precalc[2 * CZT_L];
 typedef struct __attribute__((packed)) {
 	uint32_t magic;
 	uint32_t seq;
-	uint32_t time; //TBD
+	uint32_t time; //czt processing time in ms
 	uint32_t dropADC; //dropped ADC blocks
 	uint32_t dropFrame; //dropped frame
 	float	mag[CZT_M];
@@ -232,30 +232,31 @@ int main(void)
 			adc_ready = 0;
 #ifdef PRINT
       
-			HAL_ADC_Stop_DMA(&hadc1);
+			//HAL_ADC_Stop_DMA(&hadc1);
 
-      czt_busy = 1;
+			czt_busy = 1;
 			uint32_t c0 = DWT->CYCCNT;
 			run_czt_on_adc_block();
 			uint32_t c1 = DWT->CYCCNT;
-      czt_busy = 0;
+			czt_busy = 0;
 
 			uint32_t cycles = c1-c0;
 
-      tx_frame.magic = LVS_MAGIC;
-      tx_frame.seq = frame_seq++;
-      tx_frame.time = cycles / 170000.0f; //170Mhz -> ms
+			tx_frame.magic = LVS_MAGIC;
+			tx_frame.seq = frame_seq++;
+			tx_frame.time = cycles / 170000.0f; //170Mhz -> ms
 			tx_frame.dropADC = uart_adc_drop_blocks;
-      tx_frame.dropFrame = uart_tx_drop_frames;
+			tx_frame.dropFrame = uart_tx_drop_frames;
 
-      for (uint32_t k = 0; k < CZT_M; k++) {
-        float mag = sqrtf(
-          czt_out_real[k]*czt_out_real[k] +
-          czt_out_imag[k]*czt_out_imag[k]);
-        tx_frame.mag[k] = mag;
-      }
-      uart_queue_tx((const uint8_t*)&tx_frame, sizeof(tx_frame));
-			while(1);
+			for (uint32_t k = 0; k < CZT_M; k++)
+			{
+				float mag = sqrtf(
+				czt_out_real[k]*czt_out_real[k] +
+				czt_out_imag[k]*czt_out_imag[k]);
+				tx_frame.mag[k] = mag;
+			}
+      	  	uart_queue_tx((const uint8_t*)&tx_frame, sizeof(tx_frame));
+			//while(1);
 #else
 			run_czt_on_adc_block();
 #endif
@@ -636,8 +637,9 @@ static void uart_queue_tx(const uint8_t *buf, uint32_t len)
 
   uint32_t free = uart_ring_free();
   if (free < len) {
-    uart_tx_drop_frames += (len - free);
-    
+    uart_tx_drop_frames ++;
+    if (!primask) __enable_irq();
+    return;
   }
 
   //copy into ring
