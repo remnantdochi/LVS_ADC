@@ -80,6 +80,8 @@ static float pre_chirp_table[2 * CZT_N];
 static float post_chirp_table[2 * CZT_M];
 static float kernel_fft_precalc[2 * CZT_L];
 
+static float czt_window[CZT_N];
+
 typedef struct __attribute__((packed)) {
 	uint32_t magic;
 	uint32_t seq;
@@ -112,6 +114,7 @@ static void MX_USART1_UART_Init(void);
 static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 void init_czt_constants(void);
+void init_czt_window(void);
 void czt_fft(const float *x, float *out_real, float *out_imag);
 void run_czt_on_adc_block(void);
 
@@ -175,6 +178,14 @@ void init_czt_constants(void)
     arm_cfft_radix2_f32(&fft_inst, kernel_fft_precalc);
 }
 
+void init_czt_window(void)
+{
+    //Hanning window
+    for (uint32_t n = 0; n < CZT_N; n++)
+    {
+        czt_window[n] = 0.5f * (1.0f - arm_cos_f32((2.0f * PI * (float)n) / ((float)(CZT_N - 1))));
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -215,6 +226,7 @@ int main(void)
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
 
   init_czt_constants();
+  init_czt_window();
 
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CYCCNT = 0;
@@ -557,12 +569,17 @@ void run_czt_on_adc_block(void)
 
     float mean = 0.0f;
     for (uint32_t i = 0; i < CZT_N; i++)
-        mean += (float)src_buf[i];
+    {
+      mean += (float)src_buf[i];
+    }
 
     mean /= (float)CZT_N;
 
     for (uint32_t i = 0; i < CZT_N; i++)
-        czt_x[i] = (float)src_buf[i] - mean;
+    {
+      czt_x[i] = (float)src_buf[i] - mean;
+      czt_x[i] *= czt_window[i];
+    }
 
     // 3) CZT
     czt_fft(czt_x, czt_out_real, czt_out_imag);
